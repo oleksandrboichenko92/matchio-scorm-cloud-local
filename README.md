@@ -49,3 +49,7 @@ In the Matchio API `.env`: `SCORM_API_BASE_URL=http://scorm-cloud:3030/api/v2`,
 
 Every push to `main` builds `linux/amd64` and `linux/arm64` and pushes `ghcr.io/<owner>/matchio-scorm-cloud-local`
 (`latest`, `sha-*`, and `v*` tags) with `.github/workflows/publish.yml`.
+
+## License
+
+[MIT](LICENSE)
