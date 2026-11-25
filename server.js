@@ -6,10 +6,11 @@
 //
 // - The API answers like SCORM Cloud: application configuration, registrations, launch links, postback test.
 // - A launch link opens /player/<registrationId>: the learner picks the course result there instead of taking
-//   the course, the registration is updated and posted to the configured postback URL (HTTP basic auth,
+//   the course or makes progress, the registration is updated and posted to the configured postback URL (HTTP basic auth,
 //   JSON, the registration schema), as SCORM Cloud does on every registration rollup.
 // - Every course id is accepted; the course title is the id.
-// - Credentials are not checked, only that the request has HTTP basic auth.
+// - Requests need HTTP basic auth; with APP_ID and SECRET_KEY set it must be APP_ID:SECRET_KEY, otherwise any
+//   credentials are accepted.
 // - State is kept in DATA_DIR/state.json.
 
 const crypto = require('node:crypto');
@@ -22,6 +23,10 @@ const publicUrl = (process.env.PUBLIC_URL || `http://localhost:${port}`).replace
 const dataDir = process.env.DATA_DIR || '/data';
 const statePath = path.join(dataDir, 'state.json');
 const apiPrefix = '/api/v2';
+const appCredentials =
+  process.env.APP_ID && process.env.SECRET_KEY
+    ? `Basic ${Buffer.from(`${process.env.APP_ID}:${process.env.SECRET_KEY}`).toString('base64')}`
+    : null;
 
 const completion = { unknown: 'UNKNOWN', completed: 'COMPLETED', incomplete: 'INCOMPLETE' };
 const success = { unknown: 'UNKNOWN', passed: 'PASSED', failed: 'FAILED' };
@@ -158,8 +163,12 @@ async function postTo({ url, authType, userName, password }, body) {
 // ---------- API ----------
 
 async function handleApi(req, res, route) {
-  if (!(req.headers.authorization || '').startsWith('Basic ')) {
+  const authorization = req.headers.authorization || '';
+  if (!authorization.startsWith('Basic ')) {
     return sendError(res, 401, 'Authorization is required');
+  }
+  if (appCredentials && authorization !== appCredentials) {
+    return sendError(res, 401, 'Invalid app id or secret key');
   }
 
   if (req.method === 'GET' && route === '/ping') {
@@ -273,6 +282,7 @@ function playerPage(registration, redirectOnExitUrl, postbackResult) {
   <dt>Learner</dt><dd>${escapeHtml(`${learner.firstName ?? ''} ${learner.lastName ?? ''}`)} (${escapeHtml(learner.email)})</dd>
   <dt>Registration</dt><dd>${escapeHtml(registration.id)}</dd>
   <dt>Completion</dt><dd data-testid="registration-completion">${escapeHtml(registration.registrationCompletion)}</dd>
+  <dt>Progress</dt><dd data-testid="registration-progress">${escapeHtml(Math.round((registration.registrationCompletionAmount ?? 0) * 100))}%</dd>
   <dt>Success</dt><dd data-testid="registration-success">${escapeHtml(registration.registrationSuccess)}</dd>
   <dt>Score</dt><dd data-testid="registration-score">${score === undefined ? '—' : escapeHtml(score)}</dd>
   ${postbackResult ? `<dt>Postback</dt><dd>${escapeHtml(postbackResult)}</dd>` : ''}
@@ -284,12 +294,22 @@ function playerPage(registration, redirectOnExitUrl, postbackResult) {
     <p>
       <button class="primary" name="outcome" value="passed">Complete: passed</button>
       <button name="outcome" value="failed">Complete: failed</button>
-      <button name="outcome" value="incomplete">Leave incomplete</button>
+      <button name="outcome" value="progress">Progress +25%</button>
     </p>
   </fieldset>
 </form>
 <button id="exit" type="button">Exit course</button>
-<script>document.getElementById('exit').addEventListener('click', () => { ${exitScript} });</script>
+<script>
+  document.getElementById('exit').addEventListener('click', async () => {
+    // Exiting saves the session like a course does on exit: the API gets one more postback
+    await fetch(window.location.href, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'outcome=exit',
+    }).catch(() => {});
+    ${exitScript}
+  });
+</script>
 </body>
 </html>`;
 }
@@ -329,12 +349,14 @@ async function handlePlayer(req, res, registrationId) {
         score: { scaled },
         completedDate: timestamp,
       });
-    } else {
+    } else if (outcome === 'progress' && registration.registrationCompletion !== completion.completed) {
+      // Intermediate progress the course commits while it is taken; it stops short of completion
       Object.assign(changes, {
         registrationCompletion: completion.incomplete,
-        registrationCompletionAmount: 0.5,
+        registrationCompletionAmount: Math.min(0.75, (registration.registrationCompletionAmount ?? 0) + 0.25),
       });
     }
+    // 'exit' only records the session time and the last access date
     updateRegistration(registration, changes);
     const postbackResult = await postRegistration(registration);
     return send(res, 200, playerPage(registration, redirectOnExitUrl, postbackResult));
